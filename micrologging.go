@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"log/syslog"
+	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,8 +48,9 @@ func (l Level) String() string {
 // RootLogger is the entry point to logging. You can get either the root looger, or
 // construct your own Logger, that will be a child of the root logger.
 type rootLogger struct {
-	output io.Writer
-	level  Level
+	mu      sync.Mutex
+	outputs []io.Writer
+	level   Level
 }
 
 var root *rootLogger
@@ -57,9 +60,13 @@ type Logger struct {
 }
 
 func init() {
+
+	outputs := make([]io.Writer, 1)
+	outputs[0] = os.Stdout
+
 	root = &rootLogger{
-		output: nil,
-		level:  INFO,
+		outputs: outputs,
+		level:   defaultLogLevel,
 	}
 }
 
@@ -93,8 +100,10 @@ func LevelFromString(str string) (Level, error) {
 }
 
 //SetRootOutput assigns an io.Writer to root logger
-func SetRootOutput(output io.Writer) {
-	root.output = output
+func AddRootOutput(output io.Writer) {
+	root.mu.Lock()
+	defer root.mu.Unlock()
+	root.outputs = append(root.outputs, output)
 }
 
 //SetRootLevel sets the loglvevel of the root logger
@@ -121,29 +130,6 @@ func (l *rootLogger) printf(level Level, format, name string, messages ...interf
 		return
 	}
 
-	if syslogWriter, ok := l.output.(*syslog.Writer); ok {
-
-		out := fmt.Sprintf(format, messages...)
-
-		switch level {
-		case TRACE:
-			fallthrough
-		case DEBUG:
-			syslogWriter.Debug(out)
-		case INFO:
-			syslogWriter.Info(out)
-		case WARN:
-			syslogWriter.Warning(out)
-		case ERROR:
-			syslogWriter.Err(out)
-		case FATAL:
-			syslogWriter.Crit(out)
-		default:
-			syslogWriter.Info(out)
-		}
-		return
-	}
-
 	b := &strings.Builder{}
 
 	b.WriteString("(" + time.Now().Format(timeFormat) + ") ")
@@ -166,12 +152,32 @@ func (l *rootLogger) printf(level Level, format, name string, messages ...interf
 
 	out := strings.TrimSpace(b.String())
 
-	if l.output == nil {
-		fmt.Println(out)
-		return
-	}
+	for _, output := range l.outputs {
+		if syslogWriter, ok := output.(*syslog.Writer); ok {
 
-	fmt.Fprintln(l.output, out)
+			out := fmt.Sprintf(format, messages...)
+
+			switch level {
+			case TRACE:
+				fallthrough
+			case DEBUG:
+				syslogWriter.Debug(out)
+			case INFO:
+				syslogWriter.Info(out)
+			case WARN:
+				syslogWriter.Warning(out)
+			case ERROR:
+				syslogWriter.Err(out)
+			case FATAL:
+				syslogWriter.Crit(out)
+			default:
+				syslogWriter.Info(out)
+			}
+			continue
+		}
+
+		fmt.Fprintln(output, out)
+	}
 
 }
 
